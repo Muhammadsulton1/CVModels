@@ -1,0 +1,101 @@
+MODEL:
+  # extractor: имя модели (deit_small_patch16, resnet50, dinov2_small_reg, ...)
+  extractor: dinov2_small_reg
+  # variant: для DINOv2 — small_reg, base, large
+  variant: small_reg
+  input_dim: 3
+  output_dim: 3
+  use_clf: true
+  # input_size: (H, W) — размер входа модели. DINOv2: 518, ViT/DeiT: 224
+  input_size: [518, 518]
+
+DATASET:
+  # root: путь к датасету (для ImageFolder — папка с подпапками классов)
+  root: dataset
+  # num_classes: null — считать автоматически из датасета; иначе — использовать указанное значение
+  num_classes: null
+  # Атрибуты датасета для поиска меток (порядок приоритета)
+  # targets_attrs: список атрибутов, где искать метки (targets, labels, y, ...)
+  targets_attrs: [targets, labels, y]
+  # class_mapping_attr: атрибут с маппингом имён классов в индексы (back_names, cls_names, class_to_idx, ...)
+  class_mapping_attr: null
+  # label_key: ключ в dict-элементе датасета для извлечения метки (quality_label, label, target, ...)
+  label_key: null
+
+TRAINER:
+  # optimizer_type: AdamW | Adam | RAdam | NAdam | Adamax | SGD | RMSprop
+  optimizer_type: AdamW
+  # scheduler_type: cosine | cosine_with_warmup | steplr | multisteplr | reduceonplateau | exponential | none
+  scheduler_type: cosine_with_warmup
+  num_epochs: 50
+  warmup_epochs: 5 # epochs для warmup (для cosine_with_warmup)
+  lr: 1e-4
+  weight_decay: 0.05
+  batch_size: 32
+  num_workers: 8
+  shuffle: True
+  train_proc: 0.75
+  split_strategy: random
+  use_class_weights: true
+  train_mode: scratch # scratch, finetune, resume
+  load_checkpoint: 'weights/best.pth'
+
+# Параметры оптимизаторов
+OPTIMIZER:
+  # Для SGD
+  momentum: 0.9
+  nesterov: true
+  # Для Adam/AdamW
+  betas: [0.9, 0.999]
+  eps: 1e-8
+  amsgrad: false
+
+# Параметры шедулеров
+SCHEDULER:
+  # StepLR
+  step_size: 10
+  gamma: 0.1
+  # MultiStepLR
+  milestones: [30, 60, 90]
+  # ReduceLROnPlateau
+  plateau_mode: min
+  plateau_factor: 0.5
+  plateau_patience: 7
+  plateau_min_lr: 1e-7
+  # ExponentialLR
+  exp_gamma: 0.95
+  # CosineAnnealingLR
+  eta_min: 0
+  # Warmup (для cosine_with_warmup)
+  warmup_start_factor: 0.01
+
+
+EARLY_STOPPING:
+  min_delta: 0.01 # for early stoppimg
+  patience: 10
+  save_path: weights/best_model.pth
+  n_best_nets: 5
+  soup_strategy: avg
+
+# Метрики для валидации (укажите нужные в списке)
+# Доступные: accuracy, precision_macro, precision_micro, precision_weighted,
+#            recall_macro, recall_micro, recall_weighted,
+#            f1_macro, f1_micro, f1_weighted, confusion_matrix
+METRICS:
+  enabled: true
+  list:
+    - accuracy
+    - precision_macro
+    - precision_micro
+    - precision_weighted
+    - recall_macro
+    - recall_weighted
+    - recall_micro
+    - f1_macro
+    - f1_micro
+    - f1_weighted
+    - confusion_matrix
+  # Имена классов для confusion matrix (порядок = индексы 0,1,2,...)
+  class_names: ["bad", "norm", "good"]
+
+
