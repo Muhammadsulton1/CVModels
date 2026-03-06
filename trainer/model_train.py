@@ -1,6 +1,6 @@
 from torch.nn import CrossEntropyLoss
-from cnn_backbone.backbone import FeatureExtractor
-from cnn_backbone.trainer import Trainer
+from trainer.backbone import FeatureExtractor
+from trainer.trainer import Trainer
 from torchvision import datasets, transforms
 from utils.singeleton_config import ConfigReader
 

@@ -97,8 +97,8 @@ DATASET:
 ```python
 from torch.nn import CrossEntropyLoss
 from torchvision import datasets, transforms
-from cnn_backbone.feature_extractor import DINOv2Extractor
-from cnn_backbone.trainer import Trainer
+from trainer.feature_extractor import DINOv2Extractor
+from trainer.trainer import Trainer
 
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
@@ -117,7 +117,7 @@ trainer.fit()
 Или запустите готовый скрипт:
 
 ```bash
-python cnn_backbone/model_train.py
+python trainer/model_train.py
 ```
 
 Чекпоинты сохраняются в `weights/{ИмяМодели}/best_checkpoint.pth`.
@@ -356,8 +356,8 @@ output_path = 'dataset/video/norm_result.mp4'
 ### Прямое использование
 
 ```python
-from cnn_backbone.feature_extractor import (
-    DINOv2Extractor,      # DINOv2 (small_reg, base, large)
+from trainer.feature_extractor import (
+    DINOv2Extractor,  # DINOv2 (small_reg, base, large)
     DeiT_extractor_small,
     Resnet50Extractor,
     Efficientnet_b0_extractor,
@@ -368,7 +368,7 @@ from cnn_backbone.feature_extractor import (
 ### Регистрация своей модели
 
 ```python
-from cnn_backbone.feature_extractor import FeatureExtractor
+from trainer.feature_extractor import FeatureExtractor
 
 fe = FeatureExtractor()
 fe.register_model('my_model', MyModelClass)

@@ -1517,7 +1517,7 @@ def _inspect_train_config(repo_root: Path, reference_map: ClassMap) -> List[str]
 
 
 def _inspect_inference_mapping(repo_root: Path, reference_map: ClassMap) -> List[str]:
-    inference_path = repo_root / "cnn_backbone" / "inference.py"
+    inference_path = repo_root / "trainer" / "inference.py"
     if not inference_path.exists():
         return []
 

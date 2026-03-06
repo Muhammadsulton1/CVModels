@@ -1125,7 +1125,7 @@ class FeatureExtractor:
         self.model_extractors[model_name] = model_class
         print('Модель успешно зарегистрирована')
 
-    def extract_features(self, model_name: str, size: str, input_dim: int, output_dim: int, clf_mode=False):
+    def get_model(self, model_name: str, size: str, input_dim: int, output_dim: int, clf_mode=False):
         if model_name.lower() not in self.model_extractors:
             raise KeyError(
                 f"Model {model_name} не существует в данном классе, просьба ее реализовать и добавить через register_model")
