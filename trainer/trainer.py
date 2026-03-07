@@ -81,9 +81,12 @@ class EarlyStopping:
         return averaged
 
     def save_checkpoint(self, model, optimizer, epoch: int):
-        save_dir = os.path.join('weights', self.model_name)
+        _trainer_dir = os.path.dirname(os.path.abspath(__file__))
+        _project_root = os.path.dirname(_trainer_dir)
+        save_dir = os.path.join(_project_root, 'weights', self.model_name)
         filename = 'best_checkpoint.pth'
         os.makedirs(save_dir, exist_ok=True)
+        path = os.path.join(save_dir, filename)
 
         was_training = model.training
         model.eval()
@@ -92,12 +95,11 @@ class EarlyStopping:
             'optimizer_state_dict': optimizer.state_dict(),
             'val_loss': self.best_val_loss,
             'epoch': epoch
-        }, os.path.join(save_dir, filename))
+        }, path)
         if was_training:
             model.train()
-
         logger.info(
-            f'Checkpoint saved → {os.path.join(save_dir, filename)}  [epoch={epoch}, val_loss={self.best_val_loss:.4f}]'
+            f'Checkpoint saved → {path}  [epoch={epoch}, val_loss={self.best_val_loss:.4f}]'
         )
 
 
@@ -113,14 +115,16 @@ class Trainer:
         self.model = model.to(self.device)
         self.criterion = criterion.to(self.device)
 
-        self.writer = SummaryWriter()
-        self.scaler = torch.amp.GradScaler(device=self.device.type)
+        _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        self.writers = [SummaryWriter(log_dir=os.path.join(_project_root, 'runs'))]
+        self.use_amp = bool(self.cfg.get('TRAINER', 'use_amp', True))
+        self.scaler = torch.amp.GradScaler(device=self.device.type) if self.use_amp else None
 
         torch.manual_seed(42)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = True
 
-        logger.info(f'Trainer initialized | device={self.device} | '
+        logger.info(f'Trainer initialized | device={self.device} | AMP={self.use_amp} | '
                     f'model={model.__class__.__name__}')
 
     def _get_dataset_targets(self):
@@ -479,22 +483,31 @@ class Trainer:
         for x, y in tqdm(loader, desc='Training', leave=False):
             x, y = x.to(self.device, non_blocking=True), y.to(self.device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
-            with torch.autocast(device_type=self.device.type):
+
+            def _forward():
                 if x.dim() == 5:
                     b, t, c, h, w = x.shape
-                    x = x.view(b * t, c, h, w)
-
-                prediction = self.model(x)
+                    x_ = x.view(b * t, c, h, w)
+                else:
+                    x_ = x
+                prediction = self.model(x_)
                 if prediction.size(0) != y.size(0):
                     prediction = prediction.view(y.size(0), -1, prediction.size(-1)).mean(dim=1)
+                return self.criterion(prediction, y)
 
-                loss = self.criterion(prediction, y)
-
-            self.scaler.scale(loss).backward()
-            self.scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-            self.scaler.step(optimizer)
-            self.scaler.update()
+            if self.use_amp:
+                with torch.autocast(device_type=self.device.type):
+                    loss = _forward()
+                self.scaler.scale(loss).backward()
+                self.scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                self.scaler.step(optimizer)
+                self.scaler.update()
+            else:
+                loss = _forward()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                optimizer.step()
             total_loss += loss.item()
 
         time_elapsed = time.time() - SINCE
@@ -502,7 +515,6 @@ class Trainer:
         logger.info('Training complete in {:.0f}m {:.0f}s'.format(time_elapsed // 60, time_elapsed % 60))
         return total_loss / len(loader), time_elapsed
 
-    @staticmethod
     def _get_metrics_config(self):
         """Читает настройки метрик из конфига."""
         enabled = bool(self.cfg.get('METRICS', 'enabled', False))
@@ -541,17 +553,23 @@ class Trainer:
         with torch.no_grad():
             for x, y in tqdm(loader, desc='Validation', leave=False):
                 x, y = x.to(self.device, non_blocking=True), y.to(self.device, non_blocking=True)
-                with torch.autocast(device_type=self.device.type):
+
+                def _val_forward():
                     if x.dim() == 5:
                         b, t, c, h, w = x.shape
-                        x = x.view(b * t, c, h, w)
-
-                    prediction = self.model(x)
-
+                        x_ = x.view(b * t, c, h, w)
+                    else:
+                        x_ = x
+                    prediction = self.model(x_)
                     if prediction.size(0) != y.size(0):
                         prediction = prediction.view(y.size(0), -1, prediction.size(-1)).mean(dim=1)
+                    return self.criterion(prediction, y), prediction
 
-                    loss = self.criterion(prediction, y)
+                if self.use_amp:
+                    with torch.autocast(device_type=self.device.type):
+                        loss, prediction = _val_forward()
+                else:
+                    loss, prediction = _val_forward()
 
                 total_loss += loss.item()
 
@@ -654,18 +672,21 @@ class Trainer:
 
                 self.train_loss_history.append(train_loss)
                 self.val_loss_history.append(val_loss)
-                self.writer.add_scalar('Loss/train', train_loss, epoch)
-                self.writer.add_scalar('Loss/val', val_loss, epoch)
-                self.writer.add_scalar('LR', current_lr, epoch)
+                for w in self.writers:
+                    w.add_scalar('Loss/train', train_loss, epoch)
+                    w.add_scalar('Loss/val', val_loss, epoch)
+                    w.add_scalar('LR', current_lr, epoch)
 
                 if metrics_dict:
                     for k, v in metrics_dict.items():
                         if k != 'confusion_matrix':
                             try:
-                                self.writer.add_scalar(f'Metrics/{k}', float(v), epoch)
+                                for w in self.writers:
+                                    w.add_scalar(f'Metrics/{k}', float(v), epoch)
                             except (TypeError, ValueError):
                                 pass
-                    self.writer.flush()
+                    for w in self.writers:
+                        w.flush()
 
                 output = self._format_epoch_output(
                     epoch, num_epochs, train_loss, val_loss, current_lr,
@@ -685,7 +706,8 @@ class Trainer:
                 if early_stopping.stop:
                     break
         finally:
-            self.writer.close()
+            for w in self.writers:
+                w.close()
             logger.info('TensorBoard writer closed')
 
         self.apply_model_soup(early_stopping)
@@ -694,11 +716,16 @@ class Trainer:
             best_idx = np.argmin(self.val_loss_history)
             best_epoch_num = start_epoch + best_idx
             best_val = min(self.val_loss_history)
-            logger.info('\n' + '┌' + '─' * 50 + '┐')
-            logger.info('│' + ' Training completed '.center(50) + '│')
-            logger.info('├' + '─' * 50 + '┤')
-            logger.info('│' + f'  Best val_loss: {best_val:.4f} at epoch {best_epoch_num}  '.ljust(50) + '│')
-            logger.info('└' + '─' * 50 + '┘\n')
+            w = 50
+            line = f'  Best val_loss: {best_val:.4f} at epoch {best_epoch_num}  '
+            box = '\n'.join([
+                '+' + '-' * w + '+',
+                '|' + ' Training completed '.center(w) + '|',
+                '+' + '-' * w + '+',
+                '|' + line.ljust(w) + '|',
+                '+' + '-' * w + '+',
+            ])
+            print('\n' + box + '\n')
 
     def fit(self):
         train_mode = self.cfg.get('TRAINER', 'train_mode', None)
@@ -709,15 +736,17 @@ class Trainer:
         if train_mode is None:
             raise ValueError('train_mode must be set in train_conf.yaml')
 
-        w = 58
         optimizer_type = self.cfg.get('TRAINER', 'optimizer_type', 'AdamW')
-        logger.info('\n' + '┌' + '─' * w + '┐')
-        logger.info('│' + ' Training started '.center(w) + '│')
-        logger.info('├' + '─' * w + '┤')
-        logger.info(
-            '│' + f'  mode: {train_mode}  │  epochs: {num_epochs}  │  optimizer: {optimizer_type}  │  scheduler: {scheduler_type}  '.ljust(
-                w) + '│')
-        logger.info('└' + '─' * w + '┘\n')
+        content = f'  mode: {train_mode}  |  epochs: {num_epochs}  |  optimizer: {optimizer_type}  |  scheduler: {scheduler_type}  '
+        w = max(len(content), 58)
+        box = '\n'.join([
+            '+' + '-' * w + '+',
+            '|' + ' Training started '.center(w) + '|',
+            '+' + '-' * w + '+',
+            '|' + content.ljust(w) + '|',
+            '+' + '-' * w + '+',
+        ])
+        print('\n' + box + '\n')
 
         model_name = self.model.__class__.__name__
         early_stopping = EarlyStopping(model_name=model_name)

@@ -1,6 +1,10 @@
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from torch.nn import CrossEntropyLoss
-from trainer.backbone import FeatureExtractor
-from trainer.trainer import Trainer
+from backbone import FeatureExtractor
+from trainer import Trainer
 from torchvision import datasets, transforms
 from utils.singeleton_config import ConfigReader
 
@@ -31,8 +35,9 @@ if __name__ == '__main__':
     criterion = CrossEntropyLoss(reduction='mean')
 
     fe = FeatureExtractor()
-    model = fe.extract_features(
+    model = fe.get_model(
         model_name=str(extractor),
+        size=str(variant),
         input_dim=input_dim,
         output_dim=output_dim,
         clf_mode=use_clf
