@@ -1,10 +1,12 @@
 from collections import deque
+import time
+
 import cv2
 import torch
 import torch.nn.functional as F
 
 from utils.singeleton_config import ConfigReader
-from trainer.backbone import FeatureExtractor
+from backbone import FeatureExtractor
 from utils.drawer import PredictionVideoWriter
 
 cfg = ConfigReader()
@@ -12,8 +14,8 @@ cfg = ConfigReader()
 
 class Predictor:
     def __init__(self, weights_path: str, window_size: int = 10, class_names: list[str] | None = None) -> None:
-        model_type = cfg.get('MODEL', 'extractor')
-        model_size = cfg.get('MODEL', 'variant')
+        self.model_type = cfg.get('MODEL', 'extractor')
+        self.model_size = cfg.get('MODEL', 'variant')
 
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.window_size = window_size
@@ -21,9 +23,10 @@ class Predictor:
 
         self.class_names = class_names
 
-        self.model = FeatureExtractor.get_model(
-            model_type,
-            model_size,
+        fe = FeatureExtractor()
+        self.model = fe.get_model(
+            model_name=self.model_type,
+            size=self.model_size,
             input_dim=3,
             output_dim=len(self.class_names),
             clf_mode=True)
@@ -63,13 +66,18 @@ class Predictor:
 
     @torch.no_grad()
     def smooth_prediction(self, frame):
+        t0 = time.perf_counter()
         probs, pred_idx = self.predict(frame)
+        inference_time_s = time.perf_counter() - t0
 
         self.prediction_window.append(probs.detach().cpu())
 
         stacked = torch.stack(list(self.prediction_window), dim=0)
         smooth_probs = stacked.mean(dim=0)
         smooth_idx = int(torch.argmax(smooth_probs).item())
+
+        inference_time_ms = inference_time_s * 1000
+        inference_fps = 1000.0 / inference_time_ms if inference_time_ms > 0 else 0
 
         return {
             "probs": probs,
@@ -78,6 +86,8 @@ class Predictor:
             "smooth_probs": smooth_probs,
             "smooth_idx": smooth_idx,
             "smooth_class": self.class_names[smooth_idx],
+            "inference_time_ms": inference_time_ms,
+            "inference_fps": inference_fps,
         }
 
     def probs_to_dict(self, probs: torch.Tensor) -> dict[str, float]:
@@ -86,14 +96,16 @@ class Predictor:
 
 
 if __name__ == "__main__":
-    predictor = Predictor(weights_path='./weights/weights.pth', window_size=10, class_names=['good', 'normal', 'bad'])
+    predictor = Predictor(weights_path='../weights/ViTExtractor/best_checkpoint.pth', window_size=10,
+                          class_names=['bad', 'good', 'normal'])
 
-    cap = cv2.VideoCapture('video/bad.mp4')
+    cap = cv2.VideoCapture('../video/norm.mp4')
 
     fps = cap.get(cv2.CAP_PROP_FPS)
+    inference_times = []
 
     video_writer = writer = PredictionVideoWriter(
-        save_path='output/processed_video1.mp4',
+        save_path='../output/processed_video2.mp4',
         fps=fps,
         codec="mp4v")
 
@@ -109,10 +121,24 @@ if __name__ == "__main__":
 
         annotated = writer.write_frame(frame, probs_dict, pred_class)
 
+        inf_ms = result["inference_time_ms"]
+        inf_fps = result["inference_fps"]
+        inference_times.append(inf_ms)
+        text = f"Inference: {inf_ms:.1f} ms | {inf_fps:.1f} FPS"
+        (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+        x = annotated.shape[1] - tw - 15
+        y = 30
+        cv2.putText(annotated, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+
         cv2.imshow("prediction", annotated)
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'):
             break
 
-        cap.release()
-        writer.release()
+    cap.release()
+    writer.release()
+
+    if inference_times:
+        avg_ms = sum(inference_times) / len(inference_times)
+        avg_fps = 1000.0 / avg_ms
+        print(f"Inference: {avg_ms:.1f} ms/frame (avg) | {avg_fps:.1f} FPS")

@@ -1,11 +1,14 @@
 import os
+import sys
 import time
+from datetime import datetime
+
 import numpy as np
 import torch
 
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
-from torch.utils.data import DataLoader, Subset, random_split
+from torch.utils.data import DataLoader, Dataset, Subset, random_split
 from torch.utils.tensorboard import SummaryWriter
 
 from tqdm import tqdm
@@ -17,6 +20,29 @@ from utils.logger import setup_logger
 from utils.singeleton_config import ConfigReader
 
 logger = setup_logger()
+
+
+class TransformWrapper(Dataset):
+    """Обёртка над датасетом, применяющая свой transform к каждому сэмплу."""
+
+    def __init__(self, dataset: Dataset, transform=None):
+        self.dataset = dataset
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        item = self.dataset[idx]
+        if isinstance(item, (tuple, list)) and len(item) >= 2:
+            x, y = item[0], item[1]
+            if self.transform is not None:
+                x = self.transform(x)
+            return x, y
+        if self.transform is not None:
+            return self.transform(item)
+        return item
+
 
 METRIC_FUNCS = {
     'accuracy': lambda y_true, y_pred: accuracy_score(y_true, y_pred),
@@ -104,9 +130,11 @@ class EarlyStopping:
 
 
 class Trainer:
-    def __init__(self, model, criterion, dataset):
+    def __init__(self, model, criterion, dataset, train_transform=None, val_transform=None):
         self.cfg = ConfigReader()
         self.dataset = dataset
+        self.train_transform = train_transform
+        self.val_transform = val_transform
         self.val_loss_history: list = []
         self.train_loss_history: list = []
 
@@ -116,7 +144,10 @@ class Trainer:
         self.criterion = criterion.to(self.device)
 
         _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        self.writers = [SummaryWriter(log_dir=os.path.join(_project_root, 'runs'))]
+        run_name = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+        runs_dir = os.path.join(_project_root, 'runs', run_name)
+        self.writers = [SummaryWriter(log_dir=runs_dir)]
+        logger.info(f'TensorBoard logs → {runs_dir}')
         self.use_amp = bool(self.cfg.get('TRAINER', 'use_amp', True))
         self.scaler = torch.amp.GradScaler(device=self.device.type) if self.use_amp else None
 
@@ -266,8 +297,20 @@ class Trainer:
             weights[int(cls)] = total / (n_classes * max(int(cnt), 1))
 
         weights = torch.tensor(weights, dtype=torch.float32)
-        logger.info(f'Class weights computed (n_classes={n_classes}): {[f"{w:.3f}" for w in weights.tolist()]}')
+        base_ds = self._get_base_dataset(dataset)
+        if hasattr(base_ds, 'class_to_idx'):
+            idx_to_class = {idx: cls for cls, idx in sorted(base_ds.class_to_idx.items(), key=lambda x: x[1])}
+            weight_str = ', '.join(f'{idx_to_class.get(i, f"cls_{i}")}={w:.3f}' for i, w in enumerate(weights.tolist()))
+            logger.info(f'Class weights (n_classes={n_classes}): {weight_str}')
+        else:
+            logger.info(f'Class weights computed (n_classes={n_classes}): {[f"{w:.3f}" for w in weights.tolist()]}')
         return weights
+
+    def _get_base_dataset(self, ds):
+        """Распаковывает обёртки (Subset, TransformWrapper) до базового датасета."""
+        while hasattr(ds, 'dataset'):
+            ds = ds.dataset
+        return ds
 
     def prepare_data(self):
         train_proc = float(self.cfg.get('TRAINER', 'train_proc', 0.75))
@@ -275,6 +318,13 @@ class Trainer:
         num_workers = int(self.cfg.get('TRAINER', 'num_workers', 8))
         shuffle = bool(self.cfg.get('TRAINER', 'shuffle', True))
         split_strategy = str(self.cfg.get('TRAINER', 'split_strategy', 'random')).lower()
+
+        base_ds = self._get_base_dataset(self.dataset)
+        if hasattr(base_ds, 'class_to_idx'):
+            mapping = sorted(base_ds.class_to_idx.items(), key=lambda x: x[1])
+            idx_to_class = {idx: cls for cls, idx in mapping}
+            logger.info(f'Class mapping (index -> class): {idx_to_class}')
+            logger.info(f'Class mapping (class -> index): {dict(base_ds.class_to_idx)}')
 
         n_total = len(self.dataset)
         if n_total < 2:
@@ -319,6 +369,11 @@ class Trainer:
                 self.dataset, [train_size, val_size],
                 generator=torch.Generator().manual_seed(42)
             )
+
+        if self.train_transform is not None:
+            train_dataset = TransformWrapper(train_dataset, self.train_transform)
+        if self.val_transform is not None:
+            val_dataset = TransformWrapper(val_dataset, self.val_transform)
 
         use_class_weights = self.cfg.get('TRAINER', 'use_class_weights', False)
         if use_class_weights:
@@ -480,7 +535,8 @@ class Trainer:
 
         self.model.train()
         total_loss = 0.0
-        for x, y in tqdm(loader, desc='Training', leave=False):
+        for x, y in tqdm(loader, desc='Training', leave=False, file=sys.stdout,
+                        dynamic_ncols=False, ncols=100, miniters=1, smoothing=0):
             x, y = x.to(self.device, non_blocking=True), y.to(self.device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
 
@@ -551,7 +607,8 @@ class Trainer:
         self.model.eval()
         total_loss = 0.0
         with torch.no_grad():
-            for x, y in tqdm(loader, desc='Validation', leave=False):
+            for x, y in tqdm(loader, desc='Validation', leave=False, file=sys.stdout,
+                            dynamic_ncols=False, ncols=100, miniters=1, smoothing=0):
                 x, y = x.to(self.device, non_blocking=True), y.to(self.device, non_blocking=True)
 
                 def _val_forward():

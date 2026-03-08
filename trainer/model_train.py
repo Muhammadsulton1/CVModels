@@ -1,12 +1,31 @@
 import sys
 import os
+import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
 
 from torch.nn import CrossEntropyLoss
 from backbone import FeatureExtractor
 from trainer import Trainer
-from torchvision import datasets, transforms
+from torchvision import datasets
 from utils.singeleton_config import ConfigReader
+
+
+class AlbumentationTransform:
+    """Обёртка: принимает PIL, возвращает tensor для совместимости с ImageFolder."""
+
+    def __init__(self, transform):
+        self.transform = transform
+
+    def __call__(self, img):
+        if hasattr(img, 'convert'):
+            img = np.array(img)
+        if len(img.shape) == 2:
+            img = np.stack([img] * 3, axis=-1)
+        return self.transform(image=img)['image']
+
 
 if __name__ == '__main__':
     cfg = ConfigReader()
@@ -19,19 +38,32 @@ if __name__ == '__main__':
 
     input_size = cfg.get('MODEL', 'input_size', [224, 224])
     if isinstance(input_size, (list, tuple)):
-        input_size = tuple(int(x) for x in input_size)
+        h, w = int(input_size[0]), int(input_size[1])
     else:
-        input_size = (int(input_size[0]), int(input_size[1]))
+        h, w = int(input_size[0]), int(input_size[1])
 
     dataset_root = cfg.get('DATASET', 'root', 'dataset')
 
-    transform = transforms.Compose([
-        transforms.Resize(input_size),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    ])
+    mean = [0.485, 0.456, 0.406]
+    std = [0.229, 0.224, 0.225]
 
-    dataset = datasets.ImageFolder(root=dataset_root, transform=transform)
+    train_transform = AlbumentationTransform(A.Compose([
+        A.Resize(h, w),
+        A.HorizontalFlip(p=0.5),
+        A.Rotate(limit=10, p=0.5),
+        A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.1),
+        A.HueSaturationValue(hue_shift_limit=20, sat_shift_limit=30, val_shift_limit=20, p=0.1),
+        A.Normalize(mean=mean, std=std),
+        ToTensorV2(),
+    ]))
+
+    val_transform = AlbumentationTransform(A.Compose([
+        A.Resize(h, w),
+        A.Normalize(mean=mean, std=std),
+        ToTensorV2(),
+    ]))
+
+    dataset = datasets.ImageFolder(root=dataset_root, transform=None)
     criterion = CrossEntropyLoss(reduction='mean')
 
     fe = FeatureExtractor()
@@ -43,5 +75,6 @@ if __name__ == '__main__':
         clf_mode=use_clf
     )
 
-    trainer = Trainer(model, criterion, dataset)
+    trainer = Trainer(model, criterion, dataset,
+                     train_transform=train_transform, val_transform=val_transform)
     trainer.fit()
