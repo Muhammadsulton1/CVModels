@@ -1,19 +1,24 @@
-from collections import deque
 import time
-
 import cv2
 import torch
 import torch.nn.functional as F
 
+from collections import deque, Counter
+from utils.drawer import PredictionVideoWriter
 from utils.singeleton_config import ConfigReader
 from backbone import FeatureExtractor
-from utils.drawer import PredictionVideoWriter
 
 cfg = ConfigReader()
 
 
 class Predictor:
-    def __init__(self, weights_path: str, window_size: int = 10, class_names: list[str] | None = None) -> None:
+    def __init__(
+            self,
+            weights_path: str,
+            window_size: int = 10,
+            class_names: list[str] | None = None,
+            smooth_mode: str = 'moda',) -> None:
+
         self.model_type = cfg.get('MODEL', 'extractor')
         self.model_size = cfg.get('MODEL', 'variant')
 
@@ -21,7 +26,11 @@ class Predictor:
         self.window_size = window_size
         self.prediction_window = deque(maxlen=window_size)
 
-        self.class_names = class_names
+        self.class_names = class_names or []
+        self.smooth_mode = smooth_mode
+
+        if self.smooth_mode not in ('moda', 'mean'):
+            raise ValueError(f"Неизвестный smooth_mode: {self.smooth_mode}. Используй 'moda' или 'mean'")
 
         fe = FeatureExtractor()
         self.model = fe.get_model(
@@ -29,7 +38,8 @@ class Predictor:
             size=self.model_size,
             input_dim=3,
             output_dim=len(self.class_names),
-            clf_mode=True)
+            clf_mode=True
+        )
 
         checkpoint = torch.load(weights_path, map_location=self.device)
         state_dict = checkpoint['model_state_dict'] if 'model_state_dict' in checkpoint else checkpoint
@@ -64,17 +74,40 @@ class Predictor:
         pred_idx = int(torch.argmax(probs).item())
         return probs, pred_idx
 
+    @staticmethod
+    def _mode_last_tie(values) -> int:
+        counts = Counter(values)
+        max_count = max(counts.values())
+
+        for v in reversed(values):
+            if counts[v] == max_count:
+                return v
+
+        return values[-1]
+
+    def smooth_mean(self, probs: torch.Tensor):
+        self.prediction_window.append(probs.detach().cpu())
+        stacked = torch.stack(list(self.prediction_window), dim=0)
+        smooth_probs = stacked.mean(dim=0)
+        smooth_idx = int(torch.argmax(smooth_probs).item())
+        return smooth_probs, smooth_idx
+
+    def smooth_moda(self, probs: torch.Tensor, pred_idx: int):
+        self.prediction_window.append(pred_idx)
+        window_list = list(self.prediction_window)
+        smooth_idx = self._mode_last_tie(window_list)
+        return probs.detach().cpu(), smooth_idx
+
     @torch.no_grad()
     def smooth_prediction(self, frame):
         t0 = time.perf_counter()
         probs, pred_idx = self.predict(frame)
         inference_time_s = time.perf_counter() - t0
 
-        self.prediction_window.append(probs.detach().cpu())
-
-        stacked = torch.stack(list(self.prediction_window), dim=0)
-        smooth_probs = stacked.mean(dim=0)
-        smooth_idx = int(torch.argmax(smooth_probs).item())
+        if self.smooth_mode == 'moda':
+            smooth_probs, smooth_idx = self.smooth_moda(probs, pred_idx)
+        else:
+            smooth_probs, smooth_idx = self.smooth_mean(probs)
 
         inference_time_ms = inference_time_s * 1000
         inference_fps = 1000.0 / inference_time_ms if inference_time_ms > 0 else 0
@@ -96,8 +129,9 @@ class Predictor:
 
 
 if __name__ == "__main__":
-    predictor = Predictor(weights_path='../weights/ViTExtractor/best_checkpoint.pth', window_size=10,
-                          class_names=['bad', 'good', 'normal'])
+    predictor = Predictor(weights_path='../weights/DINOv2Extractor/best_checkpoint.pth', window_size=30,
+                          class_names=['bad', 'good', 'normal'],
+                          smooth_mode='moda')
 
     cap = cv2.VideoCapture('../video/norm.mp4')
 

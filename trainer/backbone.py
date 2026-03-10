@@ -1114,6 +1114,8 @@ class FeatureExtractor:
                                  "efficientvit": EfficientViTExtractor,
                                  "deit": DeiTExtractor,
                                  "deit3": DeiT3Extractor,
+                                 "dinov2": DINOv2Extractor,
+                                 "dinov3": DINOv3Extractor,
                                  "mobilevit": MobileViTExtractor,
                                  "mobilevitv2": MobileViTExtractor,
                                  "convnext": ConvNext}
