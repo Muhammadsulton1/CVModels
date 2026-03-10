@@ -1,0 +1,11 @@
+torch>=2.0
+torchvision>=0.15
+albumentations>=1.3
+opencv-python-headless>=4.5
+numpy
+scikit-learn
+omegaconf
+tqdm
+tensorboard
+timm
+transformers

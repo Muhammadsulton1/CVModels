@@ -88,7 +88,6 @@ class ConvNextBlock(nn.Module):
     def forward(self, x):
         shortcut = self.shortcut(x)
 
-        # Depthwise
         x = self.depthwise(x)
 
         x = x.permute(0, 2, 3, 1)
@@ -212,15 +211,15 @@ class ResNetExtractor(nn.Module):
             self.encoder[0] = _modify_first_conv(original_conv, input_dim)
 
         self.head = nn.Sequential(
-            nn.Linear(self.num_features, 512),
+            nn.Linear(self.num_features, self.num_features // 2),
             nn.ReLU(),
             nn.Dropout(0.3),
-            nn.Linear(512, output_dim),
+            nn.Linear(self.num_features // 2, output_dim),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.encoder(x)
-        x = x.flatten(1)  # (B, num_features)
+        x = x.flatten(1)
         if self.clf_mode:
             return self.head(x)
         return x
@@ -258,8 +257,10 @@ class MobileNetV3Extractor(nn.Module):
 
         if self.clf_mode:
             self.final = nn.Sequential(
+                nn.Linear(self.num_features, self.num_features // 2),
+                nn.ReLU(),
                 nn.Dropout(0.3),
-                nn.Linear(self.num_features, output_dim)
+                nn.Linear(self.num_features // 2, output_dim),
             )
 
     def forward(self, x):
@@ -318,17 +319,17 @@ class ShuffleNetV2Extractor(nn.Module):
             self.encoder[0][0] = _modify_first_conv(original_conv, input_dim)
 
         self.head = nn.Sequential(
-            nn.Linear(self.num_features, 512),
+            nn.Linear(self.num_features, self.num_features // 2),
             nn.ReLU(),
             nn.Dropout(0.3),
-            nn.Linear(512, output_dim),
+            nn.Linear(self.num_features // 2, output_dim),
         )
 
         self.pool = torch.nn.AdaptiveAvgPool2d(1)
 
     def forward(self, x):
-        x = self.encoder(x)  # (B, num_features, 1, 1) — avgpool уже внутри
-        x = x.flatten(1)  # (B, num_features)
+        x = self.encoder(x)
+        x = x.flatten(1)
         if self.clf_mode:
             return self.head(x)
         return x
@@ -360,10 +361,10 @@ class MobileNetV2Extractor(nn.Module):
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
 
         self.head = nn.Sequential(
-            nn.Linear(self.num_features, 512),
+            nn.Linear(self.num_features, self.num_features // 2),
             nn.ReLU(),
             nn.Dropout(0.3),
-            nn.Linear(512, output_dim),
+            nn.Linear(self.num_features // 2, output_dim),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -427,14 +428,14 @@ class ViTExtractor(nn.Module):
         self.encoder = vit_model
 
         self.head = nn.Sequential(
-            nn.Linear(self.num_features, 512),
+            nn.Linear(self.num_features, self.num_features // 2),
             nn.ReLU(),
             nn.Dropout(0.3),
-            nn.Linear(512, output_dim),
+            nn.Linear(self.num_features // 2, output_dim),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.encoder(x)  # (B, num_features) — CLS-токен после heads=Identity
+        x = self.encoder(x)
         if self.clf_mode:
             return self.head(x)
         return x
@@ -502,10 +503,10 @@ class RegNetExtractor(nn.Module):
         self.encoder = backbone
 
         self.head = nn.Sequential(
-            nn.Linear(self.num_features, 512),
+            nn.Linear(self.num_features, self.num_features // 2),
             nn.ReLU(),
             nn.Dropout(0.3),
-            nn.Linear(512, output_dim),
+            nn.Linear(self.num_features // 2, output_dim),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -578,10 +579,10 @@ class EfficientNetExtractor(nn.Module):
         self.encoder = backbone
 
         self.head = nn.Sequential(
-            nn.Linear(self.num_features, 512),
+            nn.Linear(self.num_features, self.num_features // 2),
             nn.ReLU(),
             nn.Dropout(0.3),
-            nn.Linear(512, output_dim),
+            nn.Linear(self.num_features // 2, output_dim),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -599,13 +600,13 @@ class DeiTExtractor(nn.Module):
         Поддерживаемые варианты:
           variant                 params   top-1   num_features   input   distilled
           ─────────────────────── ──────── ─────── ─────────────  ──────  ─────────
-          'tiny-224'              5.7M     72.2%   192            224     ❌
-          'small-224'             22.1M    79.8%   384            224     ❌
-          'base-224'              86.6M    81.8%   768            224     ❌
-          'tiny-distilled-224'    5.9M     74.5%   192            224     ✅
-          'base-distilled-224'    87.3M    83.4%   768            224     ✅
-          'base-384'              86.9M    82.9%   768            384     ❌
-          'base-distilled-384'    87.3M    85.2%   768            384     ✅
+          'tiny-224'              5.7M     72.2%   192            224     no
+          'small-224'             22.1M    79.8%   384            224     no
+          'base-224'              86.6M    81.8%   768            224     no
+          'tiny-distilled-224'    5.9M     74.5%   192            224     yes
+          'base-distilled-224'    87.3M    83.4%   768            224     yes
+          'base-384'              86.9M    82.9%   768            384     no
+          'base-distilled-384'    87.3M    85.2%   768            384     yes
 
         Аргументы:
             input_dim  (int)  : количество входных каналов (1 — grayscale, 3 — RGB).
@@ -688,10 +689,10 @@ class DeiT3Extractor(nn.Module):
     """
 
     _MODELS = {
-        'small': 'deit3_small_patch16_224.fb_in22k_ft_in1k',  # 384-dim
-        'base': 'deit3_base_patch16_224.fb_in22k_ft_in1k',  # 768-dim
-        'large': 'deit3_large_patch16_224.fb_in22k_ft_in1k',  # 1024-dim
-        'huge': 'deit3_huge_patch14_224.fb_in22k_ft_in1k',  # 1280-dim
+        'small': 'deit3_small_patch16_224.fb_in22k_ft_in1k',
+        'base': 'deit3_base_patch16_224.fb_in22k_ft_in1k',
+        'large': 'deit3_large_patch16_224.fb_in22k_ft_in1k',
+        'huge': 'deit3_huge_patch14_224.fb_in22k_ft_in1k',
     }
 
     def __init__(self, input_dim: int, output_dim: int, size: str = 'small', clf_mode: bool = False):
@@ -711,10 +712,10 @@ class DeiT3Extractor(nn.Module):
         self.num_features = self.backbone.num_features
 
         self.head = nn.Sequential(
-            nn.Linear(self.num_features, 512),
+            nn.Linear(self.num_features, self.num_features // 2),
             nn.ReLU(),
             nn.Dropout(0.3),
-            nn.Linear(512, output_dim),
+            nn.Linear(self.num_features // 2, output_dim),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -734,17 +735,17 @@ class DINOv2Extractor(nn.Module):
         Поддерживаемые варианты:
           variant      patch   params    top-1   num_features   registers   input
           ──────────── ─────── ────────── ─────── ─────────────  ─────────── ──────
-          'small'      14×14   22.1M      81.1%   384            ❌          518
-          'base'       14×14   86.6M      86.5%   768            ❌          518
-          'large'      14×14   307.3M     87.6%   1024           ❌          518
-          'giant'      14×14   1100.0M    86.5%   1536           ❌          518
-          'small_reg'  14×14   22.1M      82.0%   384            ✅ reg4     518
-          'base_reg'   14×14   86.6M      87.0%   768            ✅ reg4     518
-          'large_reg'  14×14   307.3M     88.0%   1024           ✅ reg4     518
-          'giant_reg'  14×14   1100.0M    87.2%   1536           ✅ reg4     518
+          'small'      14×14   22.1M      81.1%   384            no          518
+          'base'       14×14   86.6M      86.5%   768            no          518
+          'large'      14×14   307.3M     87.6%   1024           no          518
+          'giant'      14×14   1100.0M    86.5%   1536           no          518
+          'small_reg'  14×14   22.1M      82.0%   384            yes reg4     518
+          'base_reg'   14×14   86.6M      87.0%   768            yes reg4     518
+          'large_reg'  14×14   307.3M     88.0%   1024           yes reg4     518
+          'giant_reg'  14×14   1100.0M    87.2%   1536           yes reg4     518
 
         Входной тензор : (B, input_dim, 518, 518).
-        ⚠️  Нативное разрешение 518×518 (patch14, 37×37 патчей).
+        Нативное разрешение 518×518 (patch14, 37×37 патчей).
             Передача 224×224 возможна, но снижает качество признаков.
         """
 
@@ -752,11 +753,11 @@ class DINOv2Extractor(nn.Module):
         'small': 'vit_small_patch14_dinov2.lvd142m',
         'base': 'vit_base_patch14_dinov2.lvd142m',
         'large': 'vit_large_patch14_dinov2.lvd142m',
-        'giant': 'vit_giant_patch14_dinov2.lvd142m',  # 1536-dim, 1.1B params
+        'giant': 'vit_giant_patch14_dinov2.lvd142m',
         'small_reg': 'vit_small_patch14_reg4_dinov2.lvd142m',
         'base_reg': 'vit_base_patch14_reg4_dinov2.lvd142m',
         'large_reg': 'vit_large_patch14_reg4_dinov2.lvd142m',
-        'giant_reg': 'vit_giant_patch14_reg4_dinov2.lvd142m',  # 1536-dim, 1.1B params
+        'giant_reg': 'vit_giant_patch14_reg4_dinov2.lvd142m',
     }
 
     def __init__(self, input_dim: int, output_dim: int, size: str = 'small_reg', clf_mode: bool = False):
@@ -777,10 +778,10 @@ class DINOv2Extractor(nn.Module):
         self.num_features = self.backbone.num_features
 
         self.head = nn.Sequential(
-            nn.Linear(self.num_features, 512),
+            nn.Linear(self.num_features, self.num_features // 2),
             nn.ReLU(),
             nn.Dropout(0.3),
-            nn.Linear(512, output_dim),
+            nn.Linear(self.num_features // 2, output_dim),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -843,7 +844,7 @@ class DINOv3Extractor(nn.Module):
             f"поддерживаемые архитектуры: {list(self._MODELS)}"
         )
         self.clf_mode = clf_mode
-        self.is_convnext = 'convnext' in size  # нужно в forward
+        self.is_convnext = 'convnext' in size
         hf_id = self._HF_MODELS[size]
 
         try:
@@ -874,10 +875,10 @@ class DINOv3Extractor(nn.Module):
             self.num_features = self.backbone.config.hidden_size
 
         self.head = nn.Sequential(
-            nn.Linear(self.num_features, 512),
+            nn.Linear(self.num_features, self.num_features // 2),
             nn.ReLU(),
             nn.Dropout(0.3),
-            nn.Linear(512, output_dim),
+            nn.Linear(self.num_features // 2, output_dim),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -965,10 +966,10 @@ class EfficientViTExtractor(nn.Module):
             self.num_features = out.shape[1]
 
         self.head = nn.Sequential(
-            nn.Linear(self.num_features, 512),
+            nn.Linear(self.num_features, self.num_features // 2),
             nn.ReLU(),
             nn.Dropout(0.3),
-            nn.Linear(512, output_dim),
+            nn.Linear(self.num_features // 2, output_dim),
         )
 
     def forward(self, x):
@@ -997,8 +998,8 @@ class MobileViTV2Extractor(nn.Module):
           'v2_200'   18.4M    83.4%   1024           384     IN-22k→IN-1k
 
         Входной тензор : (B, input_dim, H, W).
-        ⚠️  v2_050/075/100 — рекомендуемое разрешение 256×256.
-        ⚠️  v2_125/150/200 — рекомендуемое разрешение 384×384.
+        v2_050/075/100 — рекомендуемое разрешение 256×256.
+        v2_125/150/200 — рекомендуемое разрешение 384×384.
         """
 
     _MODELS = {
@@ -1033,10 +1034,10 @@ class MobileViTV2Extractor(nn.Module):
         self.num_features = self.backbone.num_features
 
         self.head = nn.Sequential(
-            nn.Linear(self.num_features, 512),
+            nn.Linear(self.num_features, self.num_features // 2),
             nn.ReLU(),
             nn.Dropout(0.3),
-            nn.Linear(512, output_dim),
+            nn.Linear(self.num_features // 2, output_dim),
         )
 
     def forward(self, x):
@@ -1089,10 +1090,10 @@ class MobileViTExtractor(nn.Module):
         self.num_features = self.backbone.num_features
 
         self.head = nn.Sequential(
-            nn.Linear(self.num_features, 512),
+            nn.Linear(self.num_features, self.num_features // 2),
             nn.ReLU(),
             nn.Dropout(0.3),
-            nn.Linear(512, output_dim),
+            nn.Linear(self.num_features // 2, output_dim),
         )
 
     def forward(self, x):
