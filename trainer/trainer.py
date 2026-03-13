@@ -64,22 +64,35 @@ class EarlyStopping:
         self.model_name = model_name
         self.patience = int(self.cfg.get('EARLY_STOPPING', 'patience', 10))
         self.min_delta = float(self.cfg.get('EARLY_STOPPING', 'min_delta', 0.01))
+        self.monitor = str(self.cfg.get('EARLY_STOPPING', 'monitor', 'val_loss'))
+        self.mode = str(self.cfg.get('EARLY_STOPPING', 'mode', 'min')).lower()
+        if self.mode not in {'min', 'max'}:
+            logger.warning(f'Unknown EARLY_STOPPING.mode={self.mode}. Falling back to "min".')
+            self.mode = 'min'
         self.patience_counter = 0
         self.best_val_loss = float('inf')
+        self.best_score = float('inf') if self.mode == 'min' else float('-inf')
         self.stop = False
         self.best_nets: deque = deque(maxlen=int(self.cfg.get('EARLY_STOPPING', 'n_best_nets', 5)))
 
     def __str__(self):
-        return (f'EarlyStopping(patience={self.patience}, '
-                f'best_val_loss={self.best_val_loss:.4f})')
+        return (f'EarlyStopping(patience={self.patience}, monitor={self.monitor}, '
+                f'mode={self.mode}, best_score={self.best_score:.4f})')
 
-    def step(self, model, optimizer, epoch: int, val_loss: float):
-        if self.best_val_loss - val_loss > self.min_delta:
-            self.best_val_loss = val_loss
+    def _is_improved(self, current_score: float) -> bool:
+        if self.mode == 'min':
+            return self.best_score - current_score > self.min_delta
+        return current_score - self.best_score > self.min_delta
+
+    def step(self, model, optimizer, epoch: int, monitor_value: float, val_loss: float | None = None):
+        if self._is_improved(monitor_value):
+            self.best_score = monitor_value
+            if val_loss is not None:
+                self.best_val_loss = val_loss
             self.patience_counter = 0
             self.stop = False
             self.best_nets.append(deepcopy(model.state_dict()))
-            self.save_checkpoint(model, optimizer, epoch)
+            self.save_checkpoint(model, optimizer, epoch, val_loss=val_loss)
         else:
             self.patience_counter += 1
             logger.debug(
@@ -106,7 +119,7 @@ class EarlyStopping:
                 )
         return averaged
 
-    def save_checkpoint(self, model, optimizer, epoch: int):
+    def save_checkpoint(self, model, optimizer, epoch: int, val_loss: float | None = None):
         _trainer_dir = os.path.dirname(os.path.abspath(__file__))
         _project_root = os.path.dirname(_trainer_dir)
         save_dir = os.path.join(_project_root, 'weights', self.model_name)
@@ -119,13 +132,15 @@ class EarlyStopping:
         torch.save({
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
-            'val_loss': self.best_val_loss,
+            'val_loss': self.best_val_loss if val_loss is None else val_loss,
+            'monitor_name': self.monitor,
+            'monitor_value': self.best_score,
             'epoch': epoch
         }, path)
         if was_training:
             model.train()
         logger.info(
-            f'Checkpoint saved → {path}  [epoch={epoch}, val_loss={self.best_val_loss:.4f}]'
+            f'Checkpoint saved → {path}  [epoch={epoch}, {self.monitor}={self.best_score:.4f}]'
         )
 
 
@@ -598,6 +613,22 @@ class Trainer:
                 result[name] = float(METRIC_FUNCS[name](y_true, y_pred))
         return result
 
+    def _get_monitor_value(self, val_loss: float, metrics_dict: dict | None) -> float:
+        monitor = str(self.cfg.get('EARLY_STOPPING', 'monitor', 'val_loss'))
+        if monitor == 'val_loss':
+            return float(val_loss)
+
+        if metrics_dict is None or monitor not in metrics_dict:
+            available = sorted(metrics_dict.keys()) if metrics_dict else []
+            raise KeyError(
+                f'EARLY_STOPPING.monitor={monitor} is unavailable. Available metrics: {available or ["val_loss"]}'
+            )
+
+        value = metrics_dict[monitor]
+        if isinstance(value, np.ndarray):
+            raise ValueError(f'EARLY_STOPPING.monitor={monitor} must be a scalar metric, not an array-like value')
+        return float(value)
+
     def valid_epoch(self, loader) -> tuple:
         """Возвращает (val_loss, metrics_dict или None)."""
         SINCE = time.time()
@@ -650,49 +681,30 @@ class Trainer:
 
     def _format_epoch_output(self, epoch: int, num_epochs: int, train_loss: float, val_loss: float,
                              lr: float, metrics: dict | None, train_time: float, val_time: float) -> str:
-        """Форматирует красивый вывод эпохи."""
-        _, _, class_names = self._get_metrics_config()
-        width = 92
-
-        def box_line(s: str, w: int = width - 4) -> str:
-            content = ('  ' + s)[:w].ljust(w)
-            return '║' + content + '║'
-
-        lines = [
-            '',
-            '╔' + '═' * (width - 2) + '╗',
-            box_line(
-                f'Epoch {epoch:>4} / {num_epochs}  │  train_loss: {train_loss:.4f}  │  val_loss: {val_loss:.4f}  │  lr: {lr:.2e}'),
-            '╠' + '═' * (width - 2) + '╣',
-            box_line(f'⏱ Train: {train_time:.1f}s  │  Val: {val_time:.1f}s'),
-        ]
-
+        """Форматирует строку таблицы для одной эпохи и, если нужно, матрицу ошибок."""
+        row_str = f" {epoch:>4}/{num_epochs:<4} │ {train_loss:^10.4f} │ {val_loss:^10.4f} "
+        
         if metrics:
-            lines.append('╠' + '═' * (width - 2) + '╣')
-            metric_parts = [f'{k}: {v:.4f}' for k, v in metrics.items() if k != 'confusion_matrix']
-            if metric_parts:
-                sep = '  │  '
-                full = sep.join(metric_parts)
-                max_content = width - 4
-                if len(full) <= max_content:
-                    lines.append(box_line(full))
-                else:
-                    for i in range(0, len(metric_parts), 3):
-                        chunk = sep.join(metric_parts[i:i + 3])
-                        lines.append(box_line(chunk))
+            for k, v in metrics.items():
+                if k != 'confusion_matrix':
+                    row_str += f"│ {v:^10.4f} "
+            
+        row_str += f"│ {lr:^9.2e} │ {train_time + val_time:^7.1f} "
+        
+        lines = [row_str]
 
-            if 'confusion_matrix' in metrics:
-                cm = metrics['confusion_matrix']
-                names = class_names[:cm.shape[0]] if class_names else [str(i) for i in range(cm.shape[0])]
-                lines.append('╠' + '═' * (width - 2) + '╣')
-                lines.append(box_line('Confusion Matrix:'))
-                header = '  ' + '  '.join(f'{n:>8}' for n in names)
-                lines.append(box_line(header))
-                for i, row in enumerate(cm):
-                    row_str = f'{names[i]:>6}: ' + '  '.join(f'{int(x):>8}' for x in row)
-                    lines.append(box_line(row_str))
+        if metrics and 'confusion_matrix' in metrics:
+            _, _, class_names = self._get_metrics_config()
+            cm = metrics['confusion_matrix']
+            names = class_names[:cm.shape[0]] if class_names else [str(i) for i in range(cm.shape[0])]
+            lines.append('\n  Confusion Matrix:')
+            header = '    ' + '  '.join(f'{n:>8}' for n in names)
+            lines.append(header)
+            for i, row in enumerate(cm):
+                r_str = f'  {names[i]:>6}: ' + '  '.join(f'{int(x):>8}' for x in row)
+                lines.append(r_str)
+            lines.append('-' * len(row_str))
 
-        lines.append('╚' + '═' * (width - 2) + '╝')
         return '\n'.join(lines)
 
     def load_checkpoint(self, mode: str = 'train'):
@@ -740,6 +752,21 @@ class Trainer:
                             try:
                                 for w in self.writers:
                                     w.add_scalar(f'Metrics/{k}', float(v), epoch)
+        
+        metrics_enabled, metrics_list, _ = self._get_metrics_config()
+        metric_names = [m for m in metrics_list if m != 'confusion_matrix'] if metrics_list else []
+        
+        header = f" {'Epoch':^9} │ {'Train Loss':^10} │ {'Val Loss':^10} "
+        for m in metric_names:
+            short_m = m[:10]
+            header += f"│ {short_m:^10} "
+        header += f"│ {'LR':^9} │ {'Time(s)':^7} "
+        
+        sep = "━" * len(header)
+        logger.info("\n  " + sep)
+        logger.info("  " + header)
+        logger.info("  " + sep)
+
                             except (TypeError, ValueError):
                                 pass
                     for w in self.writers:
@@ -758,8 +785,9 @@ class Trainer:
                     else:
                         scheduler.step()
 
+                monitor_value = self._get_monitor_value(val_loss, metrics_dict)
                 early_stopping.step(self.model, optimizer, epoch,
-                                    val_loss)
+                                    monitor_value, val_loss=val_loss)
                 if early_stopping.stop:
                     break
         finally:
@@ -769,7 +797,32 @@ class Trainer:
 
         self.apply_model_soup(early_stopping)
 
-        if self.val_loss_history:
+        _print_model_summary(self):
+        total_params = sum(p.numel() for p in self.model.parameters())
+        trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        frozen_params = total_params - trainable_params
+
+        info = [
+            f"Total parameters: {total_params:,}",
+            f"Trainable parameters: {trainable_params:,}",
+            f"Frozen parameters: {frozen_params:,}"
+        ]
+
+        w = max(len(line) for line in info) + 4
+        box = '\n'.join([
+            '+' + '-' * w + '+',
+            '|' + ' Model Summary '.center(w) + '|',
+            '+' + '-' * w + '+'
+        ] + [
+            '|' + line.center(w) + '|' for line in info
+        ] + [
+            '+' + '-' * w + '+'
+        ])
+        self._print_model_summary()
+
+        print('\n' + box + '\n')
+
+    def if self.val_loss_history:
             best_idx = np.argmin(self.val_loss_history)
             best_epoch_num = start_epoch + best_idx
             best_val = min(self.val_loss_history)

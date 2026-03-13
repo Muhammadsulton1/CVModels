@@ -1,13 +1,18 @@
 MODEL:
   # extractor: имя модели (deit_small_patch16, resnet50, dinov2_small_reg, ...)
-  extractor: mobilenetv3
-  # variant: для DINOv2 — small_reg, base, large
-  variant: small
+  extractor: dinov2
+  # variant: для DINOv2 — small, small_reg, base, base_reg, large, large_reg
+  variant: small_reg
   input_dim: 3
   output_dim: 3
   use_clf: true
   # input_size: (H, W) — размер входа модели. DINOv2: 518, ViT/DeiT: 224
-  input_size: [224, 224]
+  input_size: [518, 518]
+  # freeze_backbone: обучать только голову классификации поверх pretrained DINOv2
+  freeze_backbone: true
+  # head_hidden_dim: null = использовать стандартное num_features // 2
+  head_hidden_dim: 256
+  head_dropout: 0.2
 
 DATASET:
   # root: путь к датасету (для ImageFolder — папка с подпапками классов)
@@ -29,14 +34,14 @@ TRAINER:
   scheduler_type: cosine_with_warmup
   num_epochs: 50
   warmup_epochs: 5 # epochs для warmup (для cosine_with_warmup)
-  lr: 1e-4
-  weight_decay: 0.05
-  batch_size: 128
-  num_workers: 8
+  lr: 2e-4
+  weight_decay: 0.01
+  batch_size: 16
+  num_workers: 4
   shuffle: True
   train_proc: 0.75
-  split_strategy: random
-  use_class_weights: true
+  split_strategy: stratified
+  use_class_weights: false
   use_amp: true  # Automatic Mixed Precision (ускоряет обучение на GPU)
   train_mode: scratch # scratch, finetune, resume
   load_checkpoint: 'weights/best.pth'
@@ -72,7 +77,11 @@ SCHEDULER:
 
 
 EARLY_STOPPING:
-  min_delta: 0.01 # for early stoppimg
+  # monitor: val_loss или имя scalar-метрики из секции METRICS, например accuracy / f1_weighted
+  monitor: accuracy
+  # mode: min для loss, max для accuracy/F1
+  mode: max
+  min_delta: 0.001 # минимальное улучшение monitor
   patience: 30
   save_path: weights/best_model.pth
   n_best_nets: 5

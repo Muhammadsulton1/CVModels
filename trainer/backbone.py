@@ -6,6 +6,8 @@ from typing import Optional
 from torchvision import models
 from transformers import AutoModel, AutoConfig
 
+from utils.singeleton_config import ConfigReader
+
 
 def _modify_first_conv(original_conv: nn.Conv2d, input_dim: int) -> nn.Conv2d:
     new_conv = nn.Conv2d(
@@ -763,6 +765,8 @@ class DINOv2Extractor(nn.Module):
     def __init__(self, input_dim: int, output_dim: int, size: str = 'small_reg', clf_mode: bool = False):
         super().__init__()
 
+        cfg = ConfigReader()
+
         assert size in self._MODELS, (
             f"Нет такой архитектуры в DINOv2Extractor, просьба перепроверить size: (вами задан) {size},"
             f"поддерживаемые архитектуры: {list(self._MODELS)}")
@@ -777,11 +781,21 @@ class DINOv2Extractor(nn.Module):
 
         self.num_features = self.backbone.num_features
 
+        hidden_dim = cfg.get('MODEL', 'head_hidden_dim', None)
+        hidden_dim = int(hidden_dim) if hidden_dim is not None else self.num_features // 2
+        hidden_dim = max(1, hidden_dim)
+        head_dropout = float(cfg.get('MODEL', 'head_dropout', 0.3))
+        self.freeze_backbone = bool(cfg.get('MODEL', 'freeze_backbone', False))
+
+        if self.freeze_backbone:
+            for param in self.backbone.parameters():
+                param.requires_grad = False
+
         self.head = nn.Sequential(
-            nn.Linear(self.num_features, self.num_features // 2),
+            nn.Linear(self.num_features, hidden_dim),
             nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(self.num_features // 2, output_dim),
+            nn.Dropout(head_dropout),
+            nn.Linear(hidden_dim, output_dim),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
