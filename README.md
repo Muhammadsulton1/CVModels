@@ -1,20 +1,16 @@
-# CVModels — фреймворк для обучения классификаторов изображений
+# CVModels
 
-Проект для обучения и инференса моделей компьютерного зрения. Поддерживает множество архитектур (ResNet, ViT, DeiT, DINOv2, EfficientNet и др.), гибкую конфигурацию через YAML и универсальную работу с различными форматами датасетов.
+Репозиторий для **обучения моделей компьютерного зрения** на ваших данных: задача **классификации изображений** и отдельно **метрическое обучение эмбеддингов** (поиск/кластеры по косинусной близости). В качестве бэкенов используются готовые извлекатели признаков (в т.ч. **timm**, **transformers**/DINO-подобные модели через `models_src`), настройки — в **`config/train_conf.yaml`**.
 
 ---
 
-## Содержание
+## Зачем это нужно
 
-1. [Структура проекта](#структура-проекта)
-2. [Установка](#установка)
-3. [Быстрый старт](#быстрый-старт)
-4. [Конфигурация](#конфигурация)
-5. [Обучение](#обучение)
-6. [Работа с датасетами](#работа-с-датасетами)
-7. [Инференс](#инференс)
-8. [Архитектуры моделей](#архитектуры-моделей)
-9. [API и расширение](#api-и-расширение)
+- **Нужно отнести кадры к одному из классов** (например, тип отходов, дефект, сцена) — обучайте классификатор (`train_src/classification_train.py`).
+- **Нужны компактные векторные представления**, чтобы сравнивать образцы, строить поиск похожих, кластеры, центроиды классов — используйте эмбеддинги (`train_src/embedding_train.py`).
+- Единый **YAML‑конфиг**, логирование, TensorBoard, ранняя остановка, опционально **Model Soup** (усреднение последних лучших весов).
+
+**С чего начать:** раздел **[Примеры: как запустить по шагам](#примеры-как-запустить-по-шагам)** (команды `cd`, `pip`, запуск классификации и эмбеддингов, TensorBoard, инференс).
 
 ---
 
@@ -23,411 +19,289 @@
 ```
 CVModels/
 ├── config/
-│   └── train_conf.yaml      # Главный конфиг обучения
-├── cnn_backbone/
-│   ├── feature_extractor.py  # Архитектуры моделей
-│   ├── trainer.py            # Логика обучения
-│   ├── model_train.py        # Скрипт запуска обучения
-│   └── ConvNext.py           # ConvNeXt (если используется)
-├── utils/
-│   ├── singeleton_config.py  # Синглтон для чтения конфига
-│   └── logger.py             # Логирование
-├── inference.py              # Инференс на видео
-├── weights/                  # Сохранённые чекпоинты (создаётся при обучении)
-│   └── {ModelName}/
-│       └── best_checkpoint.pth
-└── README.md
+│   └── train_conf.yaml       # Основные гиперпараметры, лосс для эмбеддингов, метрики
+├── models_src/
+│   ├── clf_model.py          # Голова классификации + backbone из ModelFactory
+│   ├── emb_model.py           # Выход эмбеддингов + backbone
+│   ├── get_feature.py         # Фабрика моделей (timm/transformers/DINO и др.)
+│   └── encoder.py
+├── train_src/
+│   ├── trainer.py             # Общая логика: оптимайзеры, LR, EarlyStopping, soup, графики loss
+│   ├── classification_train.py # Запуск классификации
+│   ├── embedding_train.py      # Запуск эмбеддингов / metric learning
+│   └── inference.py           # Инференс с видео/кадров (Predictor / EmbeddingPredictor)
+├── emb_loss/
+│   └── losses.py              # SupCon, ArcLoss, Center*, комбинации
+├── utils/                     # логгер, конфиг-синглтон, вспомогательные утилиты
+├── metric_learning_data/      # Пример имени каталога с данными (задаётся в DATASET.root)
+├── weights/                   # Чекпоинты после обучения (создаются автоматически)
+└── runs/                      # Логи TensorBoard и сохранённые графики запусков
 ```
+
+### Свои классы моделей (`clf_model.py`, `emb_model.py`)
+
+Файлы **`models_src/clf_model.py`** (`ModelClassification`) и **`models_src/emb_model.py`** (`EmbeddingModel`) по сути **эталонные примеры**: как взять `backbone` из **`ModelFactory`** (конфиг `MODEL` в `train_conf.yaml`), навесить голову и отдать модель тренеру.
+
+| Задача | Точка входа | Что должно быть на выходе `forward` |
+|--------|-------------------|-------------------------------------|
+| Классификация | `classification_train.py` → `TrainerClassification` | Логиты `(batch, число классов)` |
+| Эмбеддинги | `embedding_train.py` → `TrainerEmbeddings` | Обычно `(batch, D)` при **L2-нормировке по строкам** (как у референса); для лоссов в `emb_loss` задайте **`embedding_dim` у модели**. |
+
+Чтобы использовать **свою** архитектуру головы: скопируйте один из модулей (или только класс), поправьте слои под себя и в **`classification_train.py` / `embedding_train.py`** замените импорт и конструктор — остальной конвейер (данные, лосс для эмбеддингов, чекпоинты, тренер) тот же. См. также блок `if __name__ == '__main__'` в этих файлах — там минимальный «дымовой» запуск без тренера.
 
 ---
 
 ## Установка
 
-### Зависимости
+Из корня репозитория:
 
 ```bash
-pip install torch torchvision
-pip install omegaconf scikit-learn tqdm tensorboard
-pip install timm transformers  # для ViT, DeiT, DINOv2
+pip install -r requirements.txt
 ```
 
-### Проверка
-
-```bash
-cd CVModels
-python -c "from cnn_backbone.trainer import Trainer; from utils.singeleton_config import ConfigReader; print('OK')"
-```
+Рекомендуется использовать **CUDA** для обучения; CPU возможен, но медленнее.
 
 ---
 
-## Быстрый старт
+## Примеры: как запустить по шагам
 
-### 1. Подготовка данных
+Ниже — минимальный сценарий «поставил зависимости → указал данные → запустил обучение».
 
-Структура для **ImageFolder** (рекомендуется для начала):
+### 1. Перейти в корень репозитория
 
-```
-my_dataset/
-├── class_a/
-│   ├── img1.jpg
-│   └── img2.jpg
-├── class_b/
-│   └── ...
-└── class_c/
-    └── ...
+Рабочая директория должна содержать `config/train_conf.yaml` (иначе `ConfigReader` не найдёт конфиг).
+
+```bash
+cd /path/to/CVModels          # Linux / macOS
 ```
 
-### 2. Настройка конфига
+```powershell
+cd C:\path\to\CVModels        # Windows PowerShell или CMD
+```
 
-Отредактируйте `config/train_conf.yaml`:
+Опционально — виртуальное окружение:
+
+```bash
+python -m venv .venv
+# Linux/macOS:
+source .venv/bin/activate
+# Windows (PowerShell):
+.\.venv\Scripts\Activate.ps1
+```
+
+### 2. Установить зависимости
+
+```bash
+pip install -r requirements.txt
+```
+
+### 3. Подготовить данные
+
+См. [Подготовка данных](#подготовка-данных-imagefolder). Кратко: каталог `DATASET.root` с подпапками `train/` и `val/`, внутри — папки классов с изображениями.
+
+### 4. Правки в `config/train_conf.yaml` (минимум)
+
+Замените путь к данным и при необходимости длительность обучения:
 
 ```yaml
-MODEL:
-  input_dim: 3
-  output_dim: 3          # число классов
-  use_clf: true
-  input_size: [224, 224]
-
 DATASET:
-  num_classes: null       # null = автоопределение
+  root: metric_learning_data    # или my_data — папка рядом с проектом / абсолютный путь
+
+TRAINER:
+  train_mode: scratch           # scratch | finetune | resume
+  num_epochs: 50
+  batch_size: 16
+  lr: 1.0e-4
 ```
 
-### 3. Запуск обучения
+Если путь **относительный**, он трактуется **от корня проекта** (папка, где лежит `config/`).
 
-```python
-from torch.nn import CrossEntropyLoss
-from torchvision import datasets, transforms
-from trainer.feature_extractor import DINOv2Extractor
-from trainer.trainer import Trainer
+### 5. Запуск обучения
 
-transform = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-])
-
-dataset = datasets.ImageFolder(root='my_dataset', transform=transform)
-model = DINOv2Extractor(3, 3, 'small_reg', clf_mode=True)
-criterion = CrossEntropyLoss(reduction='mean')
-
-trainer = Trainer(model, criterion, dataset)
-trainer.fit()
-```
-
-Или запустите готовый скрипт:
+**Классификация** (кросс-энтропия, метрики из секции `METRICS`):
 
 ```bash
-python trainer/model_train.py
+python train_src/classification_train.py
 ```
 
-Чекпоинты сохраняются в `weights/{ИмяМодели}/best_checkpoint.pth`.
+**Эмбеддинги / metric learning** (лосс из `EMBEDDING_LOSS`):
 
----
-
-## Конфигурация
-
-Весь проект управляется одним файлом `config/train_conf.yaml`. Конфиг загружается через синглтон `ConfigReader` — один экземпляр на всё приложение.
-
-### Секция MODEL
-
-| Параметр    | Описание                          | Пример      |
-|------------|------------------------------------|-------------|
-| extractor  | Имя модели для FeatureExtractor    | deit_small_patch16 |
-| input_dim  | Число каналов входа (1 или 3)      | 3           |
-| output_dim | Число классов                     | 3           |
-| use_clf    | Режим классификатора               | true        |
-| input_size | Размер входа [H, W]               | [224, 224]  |
-
-### Секция DATASET
-
-| Параметр           | Описание | Пример |
-|--------------------|----------|--------|
-| num_classes        | Число классов (`null` = авто) | null |
-| targets_attrs      | Атрибуты датасета с метками (по приоритету) | [targets, labels, y] |
-| class_mapping_attr | Атрибут с маппингом имён→индексы | back_names, cls_names, null |
-| label_key          | Ключ в dict-элементе для метки | quality_label, label, null |
-
-### Секция TRAINER
-
-| Параметр         | Описание | Пример |
-|------------------|----------|--------|
-| optimizer_type   | Оптимизатор | AdamW, RAdam, Adam, SGD, RMSprop, NAdam, Adamax |
-| scheduler_type   | Шедулер LR | cosine, cosine_with_warmup, steplr, multisteplr, reduceonplateau, exponential, none |
-| num_epochs       | Число эпох | 50 |
-| warmup_epochs    | Эпохи warmup (для cosine_with_warmup) | 5 |
-| lr               | Learning rate | 1e-4 |
-| weight_decay     | L2-регуляризация | 0.05 |
-| batch_size       | Размер батча | 32 |
-| num_workers      | Воркеры DataLoader | 8 |
-| train_proc       | Доля train (0.0–1.0) | 0.75 |
-| split_strategy   | Разбиение train/val | random, sequential, stratified |
-| use_class_weights | Веса классов для дисбаланса | true |
-| train_mode       | Режим обучения | scratch, finetune, resume |
-| load_checkpoint  | Путь к чекпоинту (для finetune/resume) | weights/best.pth |
-
-### Секция OPTIMIZER
-
-| Параметр | Описание | Оптимизаторы |
-|----------|----------|--------------|
-| betas    | [β1, β2] для Adam-семейства | [0.9, 0.999] |
-| eps      | Эпсилон | 1e-8 |
-| momentum | Momentum для SGD/RMSprop | 0.9 |
-| nesterov | Nesterov для SGD | true |
-
-### Секция SCHEDULER
-
-| Параметр | Описание | Шедулеры |
-|----------|----------|----------|
-| step_size | Шаг для StepLR | 10 |
-| gamma     | Множитель LR | 0.1 |
-| milestones | Эпохи для MultiStepLR | [30, 60, 90] |
-| plateau_mode, plateau_factor, plateau_patience, plateau_min_lr | ReduceLROnPlateau | — |
-| exp_gamma | Gamma для ExponentialLR | 0.95 |
-| eta_min   | Минимальный LR для Cosine | 0 |
-| warmup_start_factor | Начальный множитель для warmup | 0.01 |
-
-### Секция EARLY_STOPPING
-
-| Параметр    | Описание | Пример |
-|-------------|----------|--------|
-| patience    | Эпохи без улучшения до остановки | 10 |
-| min_delta   | Минимальное улучшение val_loss | 0.01 |
-| n_best_nets | Число лучших чекпоинтов для Model Soup | 5 |
-| soup_strategy | Стратегия усреднения | avg |
-
-### Секция METRICS
-
-| Параметр    | Описание | Пример |
-|-------------|----------|--------|
-| enabled    | Включить метрики на валидации | true |
-| list       | Список метрик | accuracy, f1_macro, confusion_matrix |
-| class_names | Имена классов для confusion matrix | ["bad", "norm", "good"] |
-
-Доступные метрики: `accuracy`, `precision_macro`, `precision_micro`, `precision_weighted`, `recall_macro`, `recall_micro`, `recall_weighted`, `f1_macro`, `f1_micro`, `f1_weighted`, `confusion_matrix`.
-
----
-
-## Обучение
-
-### Режимы обучения (train_mode)
-
-- **scratch** — обучение с нуля
-- **finetune** — загрузка чекпоинта, дообучение (оптимизатор сбрасывается)
-- **resume** — продолжение обучения (оптимизатор и эпоха восстанавливаются)
-
-### Сохранение чекпоинтов
-
-Чекпоинты сохраняются в:
-
-```
-weights/{ИмяКлассаМодели}/best_checkpoint.pth
+```bash
+python train_src/embedding_train.py
 ```
 
-Например: `weights/DINOv2Extractor/best_checkpoint.pth`.
+На **Windows**, если команда `python` не найдена, часто срабатывает лаунчер:
 
-### Model Soup
+```powershell
+py train_src/classification_train.py
+py train_src/embedding_train.py
+```
 
-После обучения применяется усреднение весов лучших чекпоинтов (Model Soup). Количество чекпоинтов задаётся в `EARLY_STOPPING.n_best_nets`.
-
-### TensorBoard
+Во время и после обучения смотрите консоль и при необходимости **TensorBoard**:
 
 ```bash
 tensorboard --logdir runs
 ```
 
-### Логи
+Откройте в браузере адрес, который выведет TensorBoard (обычно `http://localhost:6006`).
 
-Логи пишутся в `training.log` и в консоль.
+### 6. Где лежат результаты
+
+| Что | Где |
+|-----|-----|
+| Логи TensorBoard, `loss_curves.png` | `runs/ГГГГ-ММ-ДД_ЧЧ-ММ-СС/` |
+| Лучший чекпоинт по early stopping | `weights/<ИмяМодели>/best_checkpoint.pth` |
+| Веса после Model Soup (для инференса «как в конце fit») | `weights/<ИмяМодели>/final_inference.pth` |
+| Для эмбеддингов: центроиды / картинка кластеров (если включено) | внутри того же `runs/.../embeddings/...` |
+
+Имя папки под `weights/` совпадает с классом модели, например `ModelClassification` или `EmbeddingModel`.
+
+### 7. Продолжить или донастроить
+
+В `TRAINER` задайте:
+
+```yaml
+train_mode: resume              # или finetune
+load_checkpoint: weights/EmbeddingModel/best_checkpoint.pth   # пример; путь подставьте свой
+```
+
+Путь к чекпоинту — **от корня проекта** или абсолютный (см. реализацию загрузки в `train_src/trainer.py`).
+
+### 8. Инференс (пример с видео)
+
+В репозитории есть рабочий пример в конце **`train_src/inference.py`**: классификация по кадрам видео с плавностью по окну. Перед запуском отредактируйте в файле:
+
+- путь к весам `weights_path` (часто удобнее `final_inference.pth` или `best_checkpoint.pth` из шага 6);
+- список `class_names` **в том же порядке**, что и при обучении;
+- пути к входному видео и выходному файлу.
+
+Запуск из корня проекта:
+
+```bash
+python train_src/inference.py
+```
 
 ---
 
-## Работа с датасетами
+## Подготовка данных (ImageFolder)
 
-Тренажёр поддерживает разные форматы датасетов.
+Ожидается раздельное **train** и **val** (как два `ImageFolder`):
 
-### 1. ImageFolder (torchvision)
-
-Стандартная структура папок. Метки берутся из `dataset.targets` или `dataset.classes` / `dataset.class_to_idx`.
-
-```yaml
-dataset:
-  targets_attrs: [targets, labels, y]
-  # class_mapping_attr и label_key не нужны
+```
+<DATASET.root>/
+├── train/
+│   ├── class_a/
+│   ├── class_b/
+│   └── ...
+└── val/
+    ├── class_a/
+    ├── class_b/
+    └── ...
 ```
 
-### 2. Кастомный датасет с атрибутом меток
+Имена подпапок и **порядок классов** должны быть **одинаковыми** в `train` и `val` (иначе будет ошибка проверки `class_to_idx`). В конфиге указываете путь `DATASET.root` (относительно корня проекта или абсолютный).
 
-Если у датасета есть атрибут `my_labels`:
+---
 
-```yaml
-dataset:
-  targets_attrs: [my_labels]
+## Конфигурация (`config/train_conf.yaml`)
+
+Центральный файл: его читает **синглтон** `utils/singeleton_config.ConfigReader` — правки затрагивают все точки входа.
+
+| Секция | Назначение |
+|--------|------------|
+| **MODEL** | Backbone (`dinov2` и др.), размер входа `img_size`, `freeze_backbone`, для классификации задаётся `output_dims` (число классов; скрипт может перезаписать из данных). |
+| **DATASET** | `root` к данным, `num_classes` — можно зафиксировать или уточнить из данных. |
+| **TRAINER** | Эпохи, LR, `batch_size`, `optimizer_type`, `scheduler_type`, `train_mode` (`scratch` / `finetune` / `resume`), `load_checkpoint` при донастройке/продолжении. |
+| **EARLY_STOPPING** | `monitor` (`val_loss` или имя метрики из валидации, например `recall_at_1`), `mode` (`min` / `max`), `patience`, `n_best_nets`, Model Soup (`soup_strategy: avg`). |
+| **METRICS** | Для классификации: список метрик, `class_names` для матрицы ошибок. Скрипт классификации может синхронизировать имена с папками `train`. |
+| **EMBEDDING_LOSS** | Для эмбеддингов: `name` (`supcon`, `arc`, `center`, ...), параметры температуры/Arc/Center и **balanced batches** для SupCon (`classes_per_batch`, `samples_per_class`). |
+| **EMBEDDING_METRICS** | Включение доп.метрик по валидации, сохранение центроидов, отрисовка кластеров после обучения. |
+
+---
+
+## Обучение: классификация
+
+Подробные команды запуска, правки конфига и пути к весам — в разделе **[Примеры: как запустить по шагам](#примеры-как-запустить-по-шагам)**.
+
+Кратко:
+
+```bash
+python train_src/classification_train.py
 ```
 
-### 3. Датасет с `data` (список dict-элементов)
+Используется `TrainerClassification`: кросс-энтропия; метрики из секции `METRICS`, если включены и задан список.
 
-Если датасет хранит `data` — список словарей, и метка в ключе `quality_label`:
+---
 
-```yaml
-dataset:
-  targets_attrs: [targets, labels, y]
-  # Если метки в data[i]['quality_label']:
-  label_key: quality_label
-  # Если есть маппинг имён классов в индексы:
-  class_mapping_attr: back_names
+## Обучение: эмбеддинги (metric learning)
+
+Полный порядок действий такой же, как в **[Примеры: как запустить по шагам](#примеры-как-запустить-по-шагам)**; ниже отличие только командой входа и секциями конфига `EMBEDDING_*`.
+
+Подходит для **SupCon**/Arc**/Center*** и смесей через `emb_loss`:
+
+```bash
+python train_src/embedding_train.py
 ```
 
-Для других имён атрибутов:
+- В конфиге настраивается **`EMBEDDING_LOSS`**, при включённом `balanced_batches` батчи собираются с несколькими примерами на класс для контраста.
+- Валидация может считать recall@k и др.; после `fit()` в каталог запуска в `runs/.../` сохраняются **кривая потерь** (`loss_curves.png`), при настройках — **кластеры/центроиды** для эмбеддингов.
 
-```yaml
-dataset:
-  label_key: my_label
-  class_mapping_attr: cls_names
+---
+
+## Чекпоинты
+
+После успешной настройки путей веса пишутся в:
+
+```
+weights/<ИмяКлассаМодели>/best_checkpoint.pth      # Последнее лучшее состояние по раннему мониторингу
+weights/<ИмяКлассаМодели>/final_inference.pth      # После возможного Model Soup — совпадает с весами в памяти в конце fit()
 ```
 
-### 4. Tuple/List элементы
+- Для типичной донастройки и «best по метрике» используйте **`best_checkpoint.pth`**.
+- Если после обучения применился **усредняющий Model Soup**, для инференса в точности такой же модели используйте **`final_inference.pth`**.
 
-Если `__getitem__` возвращает `(image, label)` — метка берётся автоматически как второй элемент.
+Структура файла включает `model_state_dict`, при наличии — `criterion_state_dict` и `optimizer_state_dict`.
 
-### Автоопределение числа классов
+---
 
-- `DATASET.num_classes: null` — из датасета (`classes`, `class_to_idx`) или из меток
-- `DATASET.num_classes: 5` — явно задано
+## Model Soup
 
-### Стратификация
+При `EARLY_STOPPING.soup_strategy: avg` и ненулевом `n_best_nets` после цикла эпох веса **усредняются** по сохранённым лучшим снимкам. Итоговые параметры сохраняются в **`final_inference.pth`** (см. выше).
 
-При `split_strategy: stratified` разбиение сохраняет пропорции классов. Требуются метки для всех сэмплов.
+---
+
+## TensorBoard и логи
+
+```bash
+tensorboard --logdir runs
+```
+
+Каждый запуск создаёт подпапку `runs/ГГГГ-ММ-ДД_ЧЧ-ММ-СС` с трассами потерь, LR и метрик.
 
 ---
 
 ## Инференс
 
-Скрипт `inference.py` выполняет inference на видео.
+Модуль **`train_src/inference.py`** задаёт классы **`Predictor`** (классификация по softmax) и **`EmbeddingPredictor`** (эмбеддинги; опционально сравнение с заранее заданными центроидами).
 
-### Настройка
+**Минимальный сценарий** (пути к весам и видео поправьте под себя):
 
-1. Укажите путь к чекпоинту и модель.
-2. Задайте `cls_names` и `idx_to_class` в соответствии с обучением.
-3. Укажите `resize_shape` как в `MODEL.input_size`.
+1. В `if __name__ == '__main__':` в конце файла укажите `weights_path`, список **`class_names`** в том же порядке, что при обучении, и путь к видео `video/...`.
+2. Из корня проекта: `python train_src/inference.py`
+3. Выход из превью кадра: клавиша **`q`**.
 
-### Запуск
-
-```bash
-python inference.py
-```
-
-В коде задаются:
-
-```python
-video_path = 'dataset/video/norm.mp4'
-output_path = 'dataset/video/norm_result.mp4'
-```
-
-Используйте `q` для выхода из превью.
-
----
-
-## Архитектуры моделей
-
-### Доступные через FeatureExtractor
-
-| Ключ | Класс |
-|------|-------|
-| resnet18 | Resnet18Extractor |
-| resnet34 | Resnet34Extractor |
-| resnet50 | Resnet50Extractor |
-| mobilenetv2 | MobileNetV2_extractor |
-| shufflenet_v2_x0_5 | ShuffleNetV2_extractor_x05 |
-| shufflenet_v2_x1_0 | ShuffleNetV2_extractor_x10 |
-| shufflenet_v2_x1_5 | ShuffleNetV2_extractor_x15 |
-| vit_b16 | Vit_b16_extractor |
-| vit_b32 | Vit_b32_extractor |
-| mobileNetV3_small | MobileNetV3Extractor_small |
-| mobileNetV3_large | MobileNetV3Extractor_large |
-| regnet_y_400mf | RegnetY400mf_Extractor |
-| regnet_y_800mf | RegnetY800mf_Extractor |
-| efficientnet_b0 | Efficientnet_b0_extractor |
-| efficientnet_b1 | Efficientnet_b1_extractor |
-| efficientnet_b2 | Efficientnet_b2_extractor |
-| inception_v3 | InceptionV3_extractor |
-| deit_tiny_patch16 | DeiT_extractor |
-| deit_small_patch16 | DeiT_extractor_small |
-
-### Прямое использование
-
-```python
-from trainer.feature_extractor import (
-    DINOv2Extractor,  # DINOv2 (small_reg, base, large)
-    DeiT_extractor_small,
-    Resnet50Extractor,
-    Efficientnet_b0_extractor,
-    # ...
-)
-```
-
-### Регистрация своей модели
-
-```python
-from trainer.feature_extractor import FeatureExtractor
-
-fe = FeatureExtractor()
-fe.register_model('my_model', MyModelClass)
-model = fe.extract_features('my_model', input_dim=3, output_dim=3, clf_mode=True)
-```
-
----
-
-## API и расширение
-
-### ConfigReader
-
-```python
-from utils.singeleton_config import ConfigReader
-
-cfg = ConfigReader()
-value = cfg.get('TRAINER', 'batch_size', default=32)
-section = cfg.get_section('MODEL')
-```
-
-### Trainer
-
-```python
-trainer = Trainer(model, criterion, dataset)
-train_loader, val_loader = trainer.prepare_data()
-optimizer = trainer.init_optimizer(model, lr=1e-4)
-scheduler = trainer.init_scheduler(optimizer, lr, num_epochs, scheduler_type)
-trainer.fit()
-```
-
-### Требования к модели
-
-- `forward(x)` возвращает тензор `(batch_size, num_classes)` в режиме классификации
-- Поддержка `x.dim() == 5` (batch of sequences) — опционально
-
-### Требования к датасету
-
-- `__len__()` — число сэмплов
-- `__getitem__(i)` — `(image_tensor, label_int)` или совместимый формат
-- Метки для стратификации и весов классов — через `targets_attrs`, `label_key`, `class_mapping_attr`
+Детали и пример блока с `cv2.VideoCapture` — в коде файла; параметры препроцесса должны соответствовать **`MODEL.img_size`** из `config/train_conf.yaml`.
 
 ---
 
 ## Частые проблемы
 
-**FileNotFoundError: Config not found**  
-Запускайте скрипты из корня проекта `CVModels` или убедитесь, что `config/train_conf.yaml` существует.
-
-**Ошибка при stratified split**  
-Слишком мало сэмплов в каком-то классе. Используйте `split_strategy: random` или увеличьте датасет.
-
-**Не находятся метки**  
-Проверьте `targets_attrs`, `label_key`, `class_mapping_attr` в конфиге под формат вашего датасета.
-
-**Чекпоинт не загружается**  
-Укажите полный путь в `load_checkpoint` и проверьте, что модель совпадает с сохранённой.
+| Проблема | Что проверить |
+|----------|----------------|
+| `Config not found` | Запуск из корня `CVModels`, наличие `config/train_conf.yaml`. |
+| Разные `class_to_idx` у train/val | Одинаковый набор и имена папок классов в `train/` и `val/`. |
+| `output_dims` / число классов | Для классификации задайте `MODEL.output_dims` или доверьте скрипту после `ImageFolder`. |
+| Память на валидации эмбеддингов | Очень большой `val` увеличивает время/память — уменьшите выборку или `batch_size`. |
+| Несовпадение чекпоинта и «финальной» модели | Используйте **`final_inference.pth`** после soup; **`best_checkpoint.pth`** — лучший снимок в процессе обучения. |
 
 ---
-
-## Лицензия
-
-MIT (если не указано иное).
