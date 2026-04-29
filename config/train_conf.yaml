@@ -68,7 +68,7 @@ EARLY_STOPPING:
   # mode: min для loss, max для accuracy/F1
   mode: max
   min_delta: 0.001 # минимальное улучшение monitor
-  patience: 30
+  patience: 10
   save_path: weights/best_model.pth
   n_best_nets: 5
   soup_strategy: avg
